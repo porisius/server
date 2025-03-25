@@ -39,7 +39,8 @@ xi.shop =
         player:createShop(#stock / 2, log)
 
         for i = 1, #stock, 2 do
-            player:addShopItem(stock[i], stock[i + 1] * priceMultiplier)
+            local shopPrice = stock[i + 1] * priceMultiplier
+            player:addShopItem(stock[i], utils.clamp(shopPrice, 1, shopPrice))
         end
 
         player:sendMenu(xi.menuType.SHOP)
