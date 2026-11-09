@@ -165,6 +165,22 @@ HTTPServer::HTTPServer(Scheduler& scheduler)
                     res.set_content(j.dump(), "application/json");
                 });
 
+            if (settings::get<bool>("launcher.ENABLED"))
+            {
+                ShowInfoFmt("Serving launcher manifest on http://{}:{}/api/launcher/manifest.json", host, port);
+
+                httpServer_.Get(
+                    "/api/launcher/manifest.json",
+                    [&](const httplib::Request& /*req*/, httplib::Response& res)
+                    {
+                        // Built per request, so `reload_settings` and replaced files show up immediately.
+                        res.set_header("Cache-Control", "no-store");
+                        // Replace rather than throw on invalid UTF-8 (a pasted MOTD, say).
+                        const auto body = launcherManifest_.build().dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+                        res.set_content(body, "application/json");
+                    });
+            }
+
             httpServer_.set_error_handler(
                 [](const httplib::Request& /*req*/, httplib::Response& res)
                 {
