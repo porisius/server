@@ -77,6 +77,15 @@ xi.settings.launcher =
     -- changes the fingerprint and every player's xiloader will refuse the server.
     LOGIN_CERT_FILE = 'login.cert',
 
+    -- Admin API for Crystal's Settings -> Server tab (/api/launcher/admin/). Off while blank.
+    -- Use 32+ random characters, e.g. from: openssl rand -base64 33
+    -- Read at startup: restart xi_world after setting it the first time.
+    ADMIN_TOKEN = '',
+
+    -- Where the admin API keeps its overrides (update approval, maintenance, message).
+    -- They take effect at once and win over the values in this file. Relative to xi_world's folder.
+    STATE_FILE = 'launcher-state.json',
+
     -- Comma-separated list, e.g. '192.168.1.0/24,10.0.0.0/8'
     LAN_CIDRS      = '',
     HAIRPIN_ON_LAN = true,

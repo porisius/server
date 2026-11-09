@@ -20,6 +20,7 @@
 */
 
 #include "http_server.h"
+#include "launcher_admin.h"
 
 #include "common/database.h"
 #include "common/logging.h"
@@ -179,6 +180,15 @@ HTTPServer::HTTPServer(Scheduler& scheduler)
                         const auto body = launcherManifest_.build().dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
                         res.set_content(body, "application/json");
                     });
+
+                registerLauncherAdminRoutes(httpServer_, launcherManifest_, [this]() -> uint32_t
+                                            {
+                                                LockingUpdate();
+                                                uint32_t count = 0;
+                                                apiDataCache_.read([&](const auto& apiDataCache)
+                                                                   { count = apiDataCache.activeSessionCount; });
+                                                return count;
+                                            });
             }
 
             httpServer_.set_error_handler(

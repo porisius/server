@@ -15,6 +15,8 @@ set(SOURCES
     http_server.h
     ipc_server.cpp
     ipc_server.h
+    launcher_admin.cpp
+    launcher_admin.h
     launcher_manifest.cpp
     launcher_manifest.h
     party_system.cpp

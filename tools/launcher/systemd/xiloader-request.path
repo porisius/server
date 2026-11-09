@@ -1,0 +1,11 @@
+# Runs xiloader-request.service when Crystal's admin screen asks to promote or roll back xiloader
+# (xi_world writes /srv/lsb-launcher/staging/request.json).
+[Unit]
+Description=Watch for xiloader requests from the launcher admin API
+
+[Path]
+PathExists=/srv/lsb-launcher/staging/request.json
+Unit=xiloader-request.service
+
+[Install]
+WantedBy=multi-user.target

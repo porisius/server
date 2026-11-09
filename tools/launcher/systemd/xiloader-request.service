@@ -1,0 +1,14 @@
+[Unit]
+Description=Carry out a xiloader request from the launcher admin API
+
+[Service]
+Type=oneshot
+User=lsb
+Group=lsb
+SuccessExitStatus=1
+ExecStart=/usr/bin/python3 /home/lsb/server/tools/launcher/xiloader_update.py --root /srv/lsb-launcher handle-request
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/srv/lsb-launcher
+PrivateTmp=yes
