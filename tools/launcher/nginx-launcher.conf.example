@@ -1,0 +1,72 @@
+# nginx in front of the launcher manifest and downloads.
+#
+# /manifest.json is proxied to xi_world's HTTP server (network.HTTP_HOST stays 'localhost').
+# Everything else is static files from launcher.FILES_ROOT.
+#
+# Replace ffxi.example.com and the certificate paths, then:
+#   sudo ln -s /etc/nginx/sites-available/lsb-launcher /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+
+upstream lsb_world_http {
+    server 127.0.0.1:8088;   # network.HTTP_PORT
+}
+
+server {
+    listen 80;
+    server_name ffxi.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;   # nginx < 1.25.1: drop this line and use "listen 443 ssl http2;"
+    server_name ffxi.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/ffxi.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/ffxi.example.com/privkey.pem;
+
+    root /var/www/lsb-launcher;   # launcher.FILES_ROOT
+
+    # Live manifest, built by xi_world on every request
+    location = /manifest.json {
+        proxy_pass http://lsb_world_http/api/launcher/manifest.json;
+        proxy_set_header Host $host;
+        proxy_connect_timeout 3s;
+        proxy_read_timeout    30s;   # the first request after a new EXE is uploaded hashes it
+        proxy_buffering off;
+        add_header Cache-Control "no-store" always;
+    }
+
+    # Optional: live player count for a launcher status line. Only expose what you need;
+    # the rest of /api (notably /api/ips) stays private.
+    # location = /api/sessions {
+    #     proxy_pass http://lsb_world_http;
+    #     add_header Cache-Control "no-store" always;
+    # }
+
+    location /api/ {
+        return 404;
+    }
+
+    # The manifest's SHA-256 must describe the bytes clients actually get, so never cache these
+    location ~ ^/downloads/(LSBLauncher\.exe|LSBLauncher\.version|xiloader\.exe)$ {
+        add_header Cache-Control "no-store";
+        try_files $uri =404;
+    }
+
+    location /downloads/ {
+        autoindex off;
+        add_header Cache-Control "public, max-age=300";
+        try_files $uri =404;
+    }
+
+    location /verify/ {
+        autoindex off;
+        add_header Cache-Control "public, max-age=300";
+        try_files $uri =404;
+    }
+
+    location / {
+        return 404;
+    }
+}

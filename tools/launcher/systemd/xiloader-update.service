@@ -1,0 +1,19 @@
+# Checks for a new xiloader release and stages it in /srv/lsb-launcher/staging.
+# Install: see tools/launcher/README.md ("xiloader updates").
+[Unit]
+Description=Check for a new xiloader release
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=lsb
+Group=lsb
+# Exit code 10 means "staged, waiting for approval" -- not a failure
+SuccessExitStatus=10
+ExecStart=/usr/bin/python3 /home/lsb/server/tools/launcher/xiloader_update.py --root /srv/lsb-launcher check --auto-promote none
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/srv/lsb-launcher
+PrivateTmp=yes

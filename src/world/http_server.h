@@ -27,6 +27,8 @@
 
 #include "map/zone.h"
 
+#include "launcher_manifest.h"
+
 #include <httplib.h>
 
 class HTTPServer
@@ -52,4 +54,6 @@ private:
     };
 
     SynchronizedShared<APIDataCache> apiDataCache_;
+
+    LauncherManifest launcherManifest_;
 };
