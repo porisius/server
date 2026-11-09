@@ -14,6 +14,7 @@ manifest request, so promoting is the whole update.
     xiloader_update.py status                     # what's live, staged and archived
     xiloader_update.py promote [VERSION]          # publish a staged release (newest if omitted)
     xiloader_update.py rollback [VERSION]         # put an archived release back (newest if omitted)
+    xiloader_update.py handle-request             # carry out staging/request.json (from the admin API)
 
 Layout under --root (default /srv/lsb-launcher):
     downloads/xiloader.exe, downloads/xiloader.version   served to players
@@ -29,6 +30,7 @@ Exit codes: 0 nothing to do or done, 1 error, 10 a new release is staged and wai
 from __future__ import annotations
 
 import argparse
+import datetime
 import fcntl
 import hashlib
 import json
@@ -383,6 +385,42 @@ def command_rollback(args: argparse.Namespace, layout: Layout) -> int:
     return EXIT_OK
 
 
+def command_handle_request(_args: argparse.Namespace, layout: Layout) -> int:
+    """Carries out staging/request.json, written by xi_world's admin API, into staging/last-result.json."""
+    request_path = layout.staging / "request.json"
+    try:
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return EXIT_OK
+    except (OSError, json.JSONDecodeError):
+        request = {}
+    # Removed first, so the path unit doesn't run again for the same request
+    request_path.unlink(missing_ok=True)
+
+    action = request.get("action") if isinstance(request, dict) else None
+    version = request.get("version") if isinstance(request, dict) else None
+    result = {"id": request.get("id") if isinstance(request, dict) else None, "action": action, "version": version}
+    try:
+        if action == "promote":
+            done = promote(layout, requested_version(version), "staging")
+            result["message"] = f"published xiloader {version_text(done)}"
+        elif action == "rollback":
+            before = layout.live()
+            command_rollback(argparse.Namespace(version=version), layout)
+            result["message"] = f"rolled back from {version_text(before) if before else 'none'} to {version_text(layout.live())}"
+        else:
+            raise UpdateError(f"unknown request {action!r}")
+        result["ok"] = True
+    except UpdateError as error:
+        result["ok"] = False
+        result["message"] = str(error)
+        log(f"error: {error}")
+
+    result["finishedAt"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    write_atomic(layout.staging / "last-result.json", json.dumps(result, indent=2).encode(), layout.staging)
+    return EXIT_OK if result["ok"] else EXIT_ERROR
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--root", type=Path, default=Path(os.environ.get("XILOADER_UPDATE_ROOT", DEFAULT_ROOT)),
@@ -406,6 +444,9 @@ def main() -> int:
     rollback = commands.add_parser("rollback", help="put an archived release back; check then skips the version rolled back from")
     rollback.add_argument("version", nargs="?", help="version to restore (default: newest older than live)")
     rollback.set_defaults(handler=command_rollback)
+
+    commands.add_parser("handle-request", help="carry out a promote/rollback asked for through the admin API").set_defaults(
+        handler=command_handle_request)
 
     args = parser.parse_args()
     layout = Layout(args.root)

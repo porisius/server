@@ -29,8 +29,11 @@
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <fstream>
+#include <regex>
 #include <memory>
 #include <string_view>
 #include <vector>
@@ -102,6 +105,43 @@ auto readTextFile(const std::filesystem::path& path) -> std::string
 
     std::string contents((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     return trim(contents);
+}
+
+// Writes through a temporary file in the same folder, so readers never see half a file.
+auto writeAtomic(const std::filesystem::path& path, const std::string& contents) -> bool
+{
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+
+    auto temporary = path;
+    temporary += ".tmp";
+    {
+        std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+        if (!file || !file.write(contents.data(), static_cast<std::streamsize>(contents.size())))
+        {
+            return false;
+        }
+    }
+
+    std::filesystem::rename(temporary, path, ec);
+    if (ec)
+    {
+        std::filesystem::remove(temporary, ec);
+        return false;
+    }
+
+    return true;
+}
+
+auto readJsonFile(const std::filesystem::path& path) -> nlohmann::json
+{
+    std::ifstream file(path, std::ios::binary);
+    if (!file)
+    {
+        return nullptr;
+    }
+
+    return nlohmann::json::parse(file, nullptr, false); // discarded (invalid) on a parse error
 }
 
 auto hashFile(const std::filesystem::path& path) -> std::string
@@ -285,8 +325,101 @@ auto LauncherManifest::sha256Of(const std::filesystem::path& path) -> std::strin
     return hex;
 }
 
+auto LauncherManifest::readState() -> nlohmann::json
+{
+    const auto statePath = std::filesystem::path(settings::get<std::string>("launcher.STATE_FILE"));
+    if (statePath.empty())
+    {
+        return nlohmann::json::object();
+    }
+
+    std::scoped_lock lock(stateMutex_);
+    auto state = readJsonFile(statePath);
+    return state.is_object() ? state : nlohmann::json::object();
+}
+
+auto LauncherManifest::updateState(const nlohmann::json& patch) -> std::string
+{
+    if (!patch.is_object())
+    {
+        return "expected a JSON object";
+    }
+
+    for (const auto& [key, value] : patch.items())
+    {
+        const bool isBool   = key == "updateApproved" || key == "maintenance";
+        const bool isString = key == "motd";
+        if (!isBool && !isString)
+        {
+            return "unknown setting: " + key;
+        }
+        if (!value.is_null() && ((isBool && !value.is_boolean()) || (isString && !value.is_string())))
+        {
+            return key + (isBool ? " must be true, false or null" : " must be text or null");
+        }
+        if (isString && value.is_string() && value.get<std::string>().size() > 1000)
+        {
+            return "motd is longer than 1000 characters";
+        }
+    }
+
+    const auto statePath = std::filesystem::path(settings::get<std::string>("launcher.STATE_FILE"));
+    if (statePath.empty())
+    {
+        return "launcher.STATE_FILE is not set";
+    }
+
+    std::scoped_lock lock(stateMutex_);
+    auto state = readJsonFile(statePath);
+    if (!state.is_object())
+    {
+        state = nlohmann::json::object();
+    }
+
+    for (const auto& [key, value] : patch.items())
+    {
+        if (value.is_null())
+        {
+            state.erase(key);
+        }
+        else
+        {
+            state[key] = value;
+        }
+    }
+
+    if (!writeAtomic(statePath, state.dump(2, ' ', false, nlohmann::json::error_handler_t::replace) + "\n"))
+    {
+        return "cannot write " + statePath.generic_string();
+    }
+
+    return {};
+}
+
+auto LauncherManifest::effective() -> Effective
+{
+    const auto state = readState();
+
+    const auto flag = [&](const char* key, const char* setting)
+    {
+        const auto it = state.find(key);
+        return it != state.end() && it->is_boolean() ? it->get<bool>() : settings::get<bool>(setting);
+    };
+
+    Effective out{};
+    out.updateApproved = flag("updateApproved", "launcher.CLIENT_UPDATE_APPROVED");
+    // login.MAINT_MODE is the real lock (xi_connect enforces it), so it always shows
+    out.maintenance = flag("maintenance", "launcher.MAINTENANCE") || settings::get<uint8>("login.MAINT_MODE") != 0;
+
+    const auto motd = state.find("motd");
+    out.motd        = motd != state.end() && motd->is_string() ? motd->get<std::string>() : settings::get<std::string>("launcher.MOTD");
+    return out;
+}
+
 auto LauncherManifest::build() -> nlohmann::ordered_json
 {
+    const auto live = effective();
+
     const auto filesRoot = std::filesystem::path(settings::get<std::string>("launcher.FILES_ROOT"));
     const auto baseUrl   = settings::get<std::string>("launcher.PUBLIC_BASE_URL");
     const auto clientVer = settings::get<std::string>("login.CLIENT_VER");
@@ -318,17 +451,14 @@ auto LauncherManifest::build() -> nlohmann::ordered_json
     j["client"] = {
         { "requiredVersion", clientVer },
         { "comparisonMode", settings::get<std::string>("launcher.COMPARISON_MODE") },
-        { "updateApproved", settings::get<bool>("launcher.CLIENT_UPDATE_APPROVED") },
+        { "updateApproved", live.updateApproved },
     };
 
-    // xiloader
+    // xiloader: left out when it can't be hashed, so launchers fall back to their own copy
+    // rather than being handed an entry they can't verify
     {
         const auto relative = settings::get<std::string>("launcher.XILOADER_FILE");
         const auto hash     = sha256Of(localPath(relative));
-        if (hash.empty())
-        {
-            ShowErrorFmt("Launcher manifest: cannot read xiloader at {}", localPath(relative).generic_string());
-        }
 
         // The version file (written by tools/launcher/xiloader_update.py) wins over the setting
         std::string version;
@@ -342,11 +472,19 @@ auto LauncherManifest::build() -> nlohmann::ordered_json
             version = settings::get<std::string>("launcher.XILOADER_VERSION");
         }
 
-        j["xiloader"] = {
-            { "version", version },
-            { "url", joinUrl(baseUrl, relative) },
-            { "sha256", hash },
-        };
+        if (hash.empty())
+        {
+            ShowErrorFmt("Launcher manifest: cannot read xiloader at {}; xiloader left out (is launcher.FILES_ROOT set?)",
+                         localPath(relative).generic_string());
+        }
+        else
+        {
+            j["xiloader"] = {
+                { "version", version },
+                { "url", joinUrl(baseUrl, relative) },
+                { "sha256", hash },
+            };
+        }
     }
 
     // Client verification, keyed by the client version the server expects
@@ -385,8 +523,8 @@ auto LauncherManifest::build() -> nlohmann::ordered_json
         };
     }
 
-    j["maintenance"]  = settings::get<bool>("launcher.MAINTENANCE") || settings::get<uint8>("login.MAINT_MODE") != 0;
-    j["motd"]         = settings::get<std::string>("launcher.MOTD");
+    j["maintenance"]  = live.maintenance;
+    j["motd"]         = live.motd;
     j["lanCidrs"]     = splitList(settings::get<std::string>("launcher.LAN_CIDRS"));
     j["hairpinOnLan"] = settings::get<bool>("launcher.HAIRPIN_ON_LAN");
 
@@ -426,4 +564,192 @@ auto LauncherManifest::build() -> nlohmann::ordered_json
     j["lsbCommit"] = version::GetGitSha();
 
     return j;
+}
+
+namespace
+{
+
+// Versions recorded by xiloader_update.py in a staging/ or archive/ folder (xiloader-<version>.json)
+auto loaderVersionsIn(const std::filesystem::path& folder) -> std::vector<std::string>
+{
+    std::vector<std::string> versions;
+
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(folder, ec))
+    {
+        const auto name = entry.path().filename().string();
+        if (name.starts_with("xiloader-") && entry.path().extension() == ".json")
+        {
+            if (const auto meta = readJsonFile(entry.path()); meta.is_object() && meta.value("version", "") != "")
+            {
+                versions.push_back(meta.value("version", ""));
+            }
+        }
+    }
+
+    std::sort(versions.begin(), versions.end(), std::greater<>());
+    return versions;
+}
+
+const std::regex kLoaderVersion(R"(\d{1,4}\.\d{1,4}\.\d{1,4})");
+const std::regex kClientVersion(R"(\d{8}_\d{1,4})");
+const std::regex kSha256(R"([0-9A-Fa-f]{64})");
+
+} // namespace
+
+auto LauncherManifest::adminStatus(uint32_t playersOnline) -> nlohmann::ordered_json
+{
+    const auto filesRoot = std::filesystem::path(settings::get<std::string>("launcher.FILES_ROOT"));
+    const auto clientVer = settings::get<std::string>("login.CLIENT_VER");
+    const auto live      = effective();
+    const auto state     = readState();
+
+    nlohmann::ordered_json j;
+    j["playersOnline"] = playersOnline;
+    j["clientVersion"] = clientVer;
+    j["lsbCommit"]     = version::GetGitSha();
+
+    std::vector<std::string> overridden;
+    for (const auto& [key, value] : state.items())
+    {
+        overridden.push_back(key);
+    }
+
+    j["gate"] = {
+        { "updateApproved", live.updateApproved },
+        { "maintenance", live.maintenance },
+        { "loginMaintMode", settings::get<uint8>("login.MAINT_MODE") != 0 },
+        { "motd", live.motd },
+        { "overridden", overridden },
+    };
+
+    // xiloader: what's live, and what xiloader_update.py has staged or archived
+    {
+        const auto staging = filesRoot / "staging";
+
+        nlohmann::ordered_json loader;
+        const auto liveExe     = filesRoot / std::filesystem::path(settings::get<std::string>("launcher.XILOADER_FILE")).relative_path();
+        const auto liveVersion = readTextFile(filesRoot / std::filesystem::path(settings::get<std::string>("launcher.XILOADER_VERSION_FILE")).relative_path());
+        const auto liveHash    = sha256Of(liveExe);
+        loader["live"]         = liveHash.empty() ? nlohmann::ordered_json(nullptr)
+                                                  : nlohmann::ordered_json{ { "version", liveVersion }, { "sha256", liveHash } };
+        loader["staged"]       = loaderVersionsIn(staging);
+        loader["archived"]     = loaderVersionsIn(filesRoot / "archive");
+
+        const auto held = readTextFile(staging / "hold");
+        loader["held"]  = held.empty() ? nlohmann::ordered_json(nullptr) : nlohmann::ordered_json(held);
+
+        std::error_code ec;
+        loader["requestPending"] = std::filesystem::exists(staging / "request.json", ec);
+
+        const auto result    = readJsonFile(staging / "last-result.json");
+        loader["lastResult"] = result.is_object() ? nlohmann::ordered_json(result) : nlohmann::ordered_json(nullptr);
+
+        j["xiloader"] = loader;
+    }
+
+    // Verification manifests on hand
+    {
+        std::vector<std::string> versions;
+        std::error_code          ec;
+        for (const auto& entry : std::filesystem::directory_iterator(filesRoot / "verify", ec))
+        {
+            if (entry.path().extension() == ".json")
+            {
+                versions.push_back(entry.path().stem().string());
+            }
+        }
+        std::sort(versions.begin(), versions.end(), std::greater<>());
+
+        j["verify"] = {
+            { "currentPresent", std::find(versions.begin(), versions.end(), clientVer) != versions.end() },
+            { "versions", versions },
+        };
+    }
+
+    return j;
+}
+
+auto LauncherManifest::requestXiloader(const std::string& action, const std::string& version) -> std::string
+{
+    if (action != "promote" && action != "rollback")
+    {
+        return "action must be promote or rollback";
+    }
+    if (!version.empty() && !std::regex_match(version, kLoaderVersion))
+    {
+        return "version must look like 3.0.1";
+    }
+
+    const auto staging = std::filesystem::path(settings::get<std::string>("launcher.FILES_ROOT")) / "staging";
+    const auto request = staging / "request.json";
+
+    std::scoped_lock lock(stateMutex_);
+
+    std::error_code ec;
+    if (std::filesystem::exists(request, ec))
+    {
+        return "another xiloader request is still waiting; is the xiloader-request.path unit running?";
+    }
+
+    const auto id = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+
+    nlohmann::ordered_json body = {
+        { "id", std::to_string(id) },
+        { "action", action },
+        { "version", version.empty() ? nlohmann::ordered_json(nullptr) : nlohmann::ordered_json(version) },
+    };
+
+    if (!writeAtomic(request, body.dump(2) + "\n"))
+    {
+        return "cannot write " + request.generic_string();
+    }
+
+    return {};
+}
+
+auto LauncherManifest::storeVerify(const std::string& clientVersion, const std::string& body) -> std::string
+{
+    if (!std::regex_match(clientVersion, kClientVersion))
+    {
+        return "the client version must look like 30261006_0";
+    }
+
+    const auto doc = nlohmann::json::parse(body, nullptr, false);
+    if (!doc.is_object() || doc.value("schemaVersion", 0) != 1)
+    {
+        return "not a schemaVersion 1 verification manifest";
+    }
+    if (doc.value("clientVersion", "") != clientVersion)
+    {
+        return "its clientVersion doesn't match " + clientVersion;
+    }
+
+    const auto files = doc.find("files");
+    if (files == doc.end() || !files->is_array() || files->empty())
+    {
+        return "it lists no files";
+    }
+
+    for (const auto& file : *files)
+    {
+        const auto path = file.is_object() ? file.value("path", "") : std::string();
+        const auto hash = file.is_object() ? file.value("sha256", "") : std::string();
+        if (path.empty() || path.front() == '/' || path.find("..") != std::string::npos || path.find('\\') != std::string::npos ||
+            !std::regex_match(hash, kSha256) || !file.contains("size") || !file["size"].is_number_unsigned())
+        {
+            return "a file entry is malformed: " + path;
+        }
+    }
+
+    const auto target = std::filesystem::path(settings::get<std::string>("launcher.FILES_ROOT")) / "verify" / (clientVersion + ".json");
+
+    std::scoped_lock lock(stateMutex_);
+    if (!writeAtomic(target, body))
+    {
+        return "cannot write " + target.generic_string();
+    }
+
+    ShowInfoFmt("Launcher admin: stored verification manifest {} ({} files)", target.generic_string(), files->size());
+    return {};
 }

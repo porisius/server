@@ -7,6 +7,9 @@
 #   sudo ln -s /etc/nginx/sites-available/lsb-launcher /etc/nginx/sites-enabled/
 #   sudo nginx -t && sudo systemctl reload nginx
 
+# At most a few admin API requests per second per address (a wrong token also waits 1s in xi_world)
+limit_req_zone $binary_remote_addr zone=lsb_admin:1m rate=5r/s;
+
 upstream lsb_world_http {
     server 127.0.0.1:8088;   # network.HTTP_PORT
 }
@@ -43,6 +46,18 @@ server {
     #     proxy_pass http://lsb_world_http;
     #     add_header Cache-Control "no-store" always;
     # }
+
+    # Admin API for Crystal's Settings -> Server tab; xi_world checks the token (launcher.ADMIN_TOKEN).
+    # Only reachable while that token is set.
+    location /api/launcher/admin/ {
+        limit_req zone=lsb_admin burst=20 nodelay;
+        proxy_pass http://lsb_world_http;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        client_max_body_size 32m;     # verification manifests
+        proxy_read_timeout 60s;
+        add_header Cache-Control "no-store" always;
+    }
 
     location /api/ {
         return 404;
