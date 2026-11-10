@@ -452,6 +452,8 @@ auto LauncherManifest::build() -> nlohmann::ordered_json
         { "requiredVersion", clientVer },
         { "comparisonMode", settings::get<std::string>("launcher.COMPARISON_MODE") },
         { "updateApproved", live.updateApproved },
+        // How login compares versions (first 6 characters): 0 off, 1 must match, 2 this or newer
+        { "verLock", settings::get<uint8>("login.VER_LOCK") },
     };
 
     // xiloader: left out when it can't be hashed, so launchers fall back to their own copy
