@@ -101,3 +101,43 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now xiloader-update.timer
 journalctl -u xiloader-update     # what the last checks found
 ```
+
+## Admin API (Crystal's Settings → Server tab)
+
+Crystal can run the day-to-day jobs from its Settings → Server tab: approve or hold client
+updates, set maintenance and the server message, promote or roll back xiloader, and generate and
+upload the verification manifest for the current client version.
+
+1. Make a token and put it in `settings/launcher.lua`, then restart xi_world:
+
+   ```
+   openssl rand -base64 33
+   ```
+   ```lua
+   ADMIN_TOKEN = '<that output>',
+   ```
+
+2. Add the `location /api/launcher/admin/` block (and the `limit_req_zone` line) from
+   `nginx-launcher.conf.example`, then `sudo nginx -t && sudo systemctl reload nginx`.
+
+3. For xiloader promote/rollback from Crystal, install the request watcher:
+
+   ```
+   sudo cp tools/launcher/systemd/xiloader-request.{path,service} /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now xiloader-request.path
+   ```
+
+4. In Crystal: Settings → Server, enter the server (`ffxi.example.com`) and the token.
+
+Changes made there are kept in `launcher.STATE_FILE` (`launcher-state.json` next to xi_world) and
+win over `settings/launcher.lua` until cleared from the same screen. They show in the manifest on
+the next request; nothing needs `reload_settings`.
+
+"Maintenance" here is the launcher's notice. The login lock itself is `login.MAINT_MODE`, which
+xi_connect enforces; the screen shows when it is on.
+
+Treat the token like a password: anyone holding it can hold updates, post a message, switch
+xiloader between versions you've staged, and replace verification manifests. It can't run
+commands or read anything else on the server. To change it, edit `ADMIN_TOKEN` and run
+`reload_settings`; to turn the API off, blank it and restart xi_world.
