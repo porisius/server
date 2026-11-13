@@ -39,3 +39,9 @@
 # Live example:
 
 custom/lua/test_npcs_in_gm_home.lua
+custom/lua/blu_spell_chance.lua
+custom/lua/moghouse_exit_homepoint.lua
+custom/cpp/conquest_population_v2.cpp
+trust_pet_assist
+alliance_trusts
+custom/sql/external_ip.sql
