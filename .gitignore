@@ -276,3 +276,4 @@ clang_tidy_summary.md
 /data/schemas/*.schema.json
 !/data/schemas/_*.schema.json
 xi_data_schema
+modules/custom/sql/external_ip.sql
